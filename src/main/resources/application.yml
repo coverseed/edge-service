@@ -1,0 +1,146 @@
+server:
+  port: 9000
+  shutdown: graceful
+  netty:
+    connection-timeout: 2s  # 与服务器建立 TCP 连接的等待时长
+    idle-timeout: 15s # 如果没有数据传输，关闭 TCP 连接前的等待时长
+
+spring:
+  application:
+    name: edge-service
+  lifecycle:
+    timeout-per-shutdown-phase: 15s # 定义了一个 15 秒的宽限期
+  config:
+    import: "" # 在使用 Config Service 时，添加 "optional:configserver:" (https://docs.spring.io/spring-cloud-config/docs/current/reference/html/#config-data-import)
+  cloud:
+    config:
+      enabled: false # 在使用 Config Service 时，将其设置为 true
+      uri: http://localhost:8888
+      request-connect-timeout: 5000 # 等待连接到 Config Service 的超时时间(5s)
+      request-read-timeout: 5000  # 等待从 Config Service 读取配置数据的超时时间(5s)
+      fail-fast: false # 在生产环境中，将其设置为 true (设置为 true 才会启用重试)
+      retry:
+        max-attempts: 6 # 最大重试次数
+        initial-interval: 1000  # 回退重试的初始间隔(1s)
+        max-interval: 2000 # 回退重试的最大间隔(2s)
+        multiplier: 1.1 # 用于计算下一个间隔的倍增系数
+    gateway:
+      httpclient:
+        connect-timeout: 2000 # 建立连接的时间限制（毫秒）
+        response-timeout: 5s  # 接收响应的时间限制（Duration）
+        pool:
+          type: elastic # 连接池类型（弹性）
+          max-idle-time: 15s  # 通信通道闲置多长时间后关闭
+          max-life-time: 60s  # 通信通道在多长时间后关闭
+      default-filters:
+        - SaveSession # 确保在向下游转发请求之前保存会话数据
+        - TokenRelay  # 在调用下游服务时，启用 Access Token 的传播
+        - name: RequestRateLimiter
+          args:
+            redis-rate-limiter:
+              replenishRate: 10 # 令牌桶中每秒滴入的令牌数
+              burstCapacity: 20 # 允许最多 20 个请求的突发流量
+              requestedTokens: 1  # 每个请求消耗的令牌数
+        - name: Retry
+          args:
+            retries: 3  # 最多进行 3 次重试
+            methods: GET  # 仅对 GET 请求进行重试
+            series: SERVER_ERROR  # 仅在发生 5XX 错误时重试
+            exceptions: java.io.IOException, java.util.concurrent.TimeoutException  # 仅在抛出指定异常时重试
+            backoff: # 以延迟方式重试，延迟计算公式为 firstBackoff * (factor ^ n)
+              firstBackoff: 50ms
+              maxBackOff: 500ms
+              factor: 2
+              basedOnPreviousValue: false
+      routes:
+        - id: spa-route
+          uri: ${SPA_URL:http://localhost:9004}
+          predicates:
+            - Path=/,/*.css,/*.js,/favicon.ico
+        - id: catalog-route
+          uri: ${CATALOG_SERVICE_URL:http://localhost:9001}/books
+          predicates:
+            - Path=/books/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: catalogCircuitBreaker
+                fallbackUri: forward:/catalog-fallback
+        - id: order-route
+          uri: ${ORDER_SERVICE_URL:http://localhost:9002}/orders
+          predicates:
+            - Path=/orders/**
+          filters:
+            - name: CircuitBreaker
+              args:
+                name: orderCircuitBreaker
+  redis:
+    connect-timeout: 2s # 建立连接的时间限制
+    host: localhost
+    port: 6379
+    timeout: 1s # 接收响应的时间限制
+  session:
+    store-type: redis
+    timeout: 10m  # 会话超时时间
+    redis:
+      namespace: polar:edge
+  security:
+    oauth2:
+      client:
+        registration:
+          keycloak: # 在 Spring Security 中用于标识客户端注册的名称（registrationId），可以是任意字符串
+            client-id: edge-service # 在 Keycloak 中定义的 OAuth2 客户端标识符
+            client-secret: polar-keycloak-secret  # 客户端用于向 Keycloak 进行身份验证的共享密钥
+            scope: openid,roles # 客户端希望获得访问权限的作用域列表，其中 openid 作用域会在 OAuth2 基础上触发 OIDC 身份验证
+        provider:
+          keycloak: # 与 spring.security.oauth2.client.registration.registrationId 相同
+            issuer-uri: http://localhost:8080/realms/PolarBookshop  # 用于获取特定 realm 下所有相关 OAuth2 和 OIDC 端点信息的 Keycloak URL
+
+resilience4j:
+  circuitbreaker:
+    configs:
+      default: # 所有断路器的默认配置 Bean
+        slidingWindowSize: 20 # 在断路器闭合时用于记录调用结果的滑动窗口大小
+        permittedNumberOfCallsInHalfOpenState: 5  # 断路器半开状态下允许的调用次数
+        failureRateThreshold: 50  # 当失败率超过阈值时，断路器将打开
+        waitDurationInOpenState: 15000  # 从打开状态移动到半开状态之前的等待时间（毫秒）
+  timelimiter:
+    configs:
+      default: # 所有超时限制器的默认配置 Bean
+        timeoutDuration: 5s # 配置超时（秒）
+
+logging:
+  group:
+    circuitbreaker: io.github.resilience4j, org.springframework.cloud.circuitbreaker
+  level:
+    circuitbreaker: info
+  pattern:
+    level: "%5p [${spring.application.name},%X{trace_id},%X{span_id}]"
+
+info:
+  system: Polar Bookshop
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, prometheus
+  endpoint:
+    health:
+      show-details: always
+      show-components: always
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,redis # readiness 探针将结合应用程序的 readiness(就绪状态)和 Redis 的可用性
+  info:
+    env:
+      enabled: true
+    java:
+      enabled: true
+    os:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
