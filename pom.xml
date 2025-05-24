@@ -31,6 +31,9 @@
         <spring-cloud.version>2021.0.9</spring-cloud.version>
         <otel.version>2.15.0</otel.version>
         <testcontainers.version>1.20.6</testcontainers.version>
+        <docker.publishRegistry.url></docker.publishRegistry.url>
+        <docker.publishRegistry.username></docker.publishRegistry.username>
+        <docker.publishRegistry.password></docker.publishRegistry.password>
     </properties>
     <dependencies>
         <dependency>
@@ -139,6 +142,15 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <docker>
+                        <publishRegistry>
+                            <url>${docker.publishRegistry.url}</url>
+                            <username>${docker.publishRegistry.username}</username>
+                            <password>${docker.publishRegistry.password}</password>
+                        </publishRegistry>
+                    </docker>
+                </configuration>
             </plugin>
         </plugins>
     </build>
